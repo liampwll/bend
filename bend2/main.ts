@@ -22,6 +22,7 @@ import type { BunPlugin } from "bun";
 
 import * as Bend from "./bend.ts";
 import * as Comp from "./comp.ts";
+import * as Why3 from "./why3.ts";
 
 // Main
 // ====
@@ -34,11 +35,22 @@ const VERSION = "2.0.16";
 const HELP = `Bend ${VERSION}: check, run, build and publish Bend programs.
 
 usage:
-  bend <file.bend> [args]     check the file, then run main with args
+  bend <file.bend> [args]     check (Why3 discharges open laws), then run main
                               (IO.args; a "--" ends bend's own options)
   bend <file.bend> -o <out>   build a binary; <out>.c emits C, <out>.js JS
   bend <file.bend> --checkup  check and run each import alone
   bend <file.bend> --publish  publish the file and its imports to the hub
+  bend <file.bend> --why3    export laws as WhyML (stdout, or -o <file.mlw>)
+  bend <file.bend> --prove   check all proofs without running main
+    -o <file.mlw>            save the discharged Why3 tasks for inspection
+    --kernel-only            disable automatic Why3 proof checking
+    --law <name>             standalone law selection with --why3/--prove
+    --prover <name>          Why3 prover/shortcut (repeatable; default alt-ergo)
+    --timeout <seconds>      time per goal/prover (default 1; standalone: 5)
+    --jobs <count>           maximum concurrent Why3/prover attempts (1-64)
+    --induct <variable>      select a variable for induction (repeatable)
+    --why3-bin <path>        Why3 executable (default why3)
+    --why3-config <file>     Why3 prover configuration
   bend <page.html> -o <dir>   bundle a page that imports .bend files
   bend base [--types|<name>]  print Base, its types, or a name and its subnames
   bend guide                  print the Bend guide
@@ -78,13 +90,16 @@ for (let n = from;; n += step) {
   }
 }`;
 
-const PLUGIN: BunPlugin = {
-  name: "bend",
-  setup(build) {
-    build.onLoad({ filter: /\.bend$/ }, async (args) =>
-      ({ contents: await load_js(args.path), loader: "js" }));
-  },
-};
+function plugin(checking: Why3.CheckOptions = {}): BunPlugin {
+  return {
+    name: "bend",
+    setup(build) {
+      build.onLoad({ filter: /\.bend$/ }, async (args) =>
+        ({ contents: await load_js(args.path, checking), loader: "js" }));
+    },
+  };
+}
+const PLUGIN = plugin();
 
 // CLI
 // ===
@@ -176,6 +191,11 @@ async function cli_file(args: string[]): Promise<void> {
   let file: string | undefined;
   let checkup = false;
   let publish = false;
+  let why3 = false;
+  let prove = false;
+  let kernelOnly = false;
+  const laws: string[] = [], provers: string[] = [], induct: string[] = [];
+  const proof: Why3.ProveOptions = { provers };
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i];
     if (a === "--help" || a === "-h") {
@@ -184,6 +204,31 @@ async function cli_file(args: string[]): Promise<void> {
       checkup = true;
     } else if (a === "--publish") {
       publish = true;
+    } else if (a === "--why3" || a === "--prove") {
+      why3 ||= a === "--why3";
+      prove ||= a === "--prove";
+    } else if (a === "--kernel-only") {
+      kernelOnly = true;
+    } else if (["--law", "--prover", "--timeout", "--jobs", "--induct", "--why3-bin", "--why3-config"].includes(a)) {
+      const value = args[++i];
+      if (value === undefined || value.startsWith("--")) cli_fail(a + " needs a value");
+      if (a === "--law") laws.push(value);
+      if (a === "--prover") provers.push(value);
+      if (a === "--induct") induct.push(value);
+      if (a === "--why3-bin") proof.binary = value;
+      if (a === "--why3-config") proof.config = value;
+      if (a === "--jobs") {
+        proof.jobs = Number(value);
+        if (!/^\d+$/.test(value) || proof.jobs < 1 || proof.jobs > 64) {
+          cli_fail("--jobs must be an integer from 1 to 64");
+        }
+      }
+      if (a === "--timeout") {
+        proof.timeout = Number(value);
+        if (!/^\d+$/.test(value) || proof.timeout < 1 || proof.timeout > 3600) {
+          cli_fail("--timeout must be an integer from 1 to 3600 seconds");
+        }
+      }
     } else if (a === "-o") {
       i += 1;
       outs.push(args[i] ?? cli_fail("-o needs an output file"));
@@ -201,16 +246,26 @@ async function cli_file(args: string[]): Promise<void> {
     cli_say(1, HELP);
     process.exit(1);
   }
+  if (laws.length && !why3 && !prove) cli_fail("--law selects standalone --why3 or --prove goals");
+  why3 ||= laws.length > 0 || (!prove && outs.some((out) => /\.(mlw|why)$/.test(out)));
+  if (kernelOnly && (why3 || prove)) cli_fail("--kernel-only cannot be combined with --why3 or --prove");
+  const checking: Why3.CheckOptions = { ...proof, induct, kernelOnly };
+  if ((why3 || prove) && (checkup || publish || file.endsWith(".html") || outs.length > 1)) {
+    cli_fail("Why3 takes one Bend file and at most one output, without --checkup or --publish");
+  }
+  if ((why3 || prove) && outs.some((out) => !/\.(mlw|why)$/.test(out))) {
+    cli_fail("Why3 output must end in .mlw or .why");
+  }
   if (file.endsWith(".html")) {
     if (outs.length !== 1 || checkup || publish) {
       cli_fail("a page bundles with -o <dir>");
     }
-    return cli_bundle(file, outs[0]);
+    return cli_bundle(file, outs[0], checking);
   }
   if (publish && (outs.length !== 0 || checkup)) {
     cli_fail("--publish takes no other option");
   }
-  if (argv.length !== 0 && (outs.length !== 0 || checkup || publish)) {
+  if (argv.length !== 0 && (outs.length !== 0 || checkup || publish || why3 || prove)) {
     cli_fail("arguments go to a run: bend <file.bend> [args]");
   }
   if (checkup && outs.length !== 0) {
@@ -218,14 +273,27 @@ async function cli_file(args: string[]): Promise<void> {
       + " import alone");
   }
   try {
+    if (why3) {
+      return await cli_why3(file, outs[0], prove, { laws, induct }, proof);
+    }
+    if (prove) {
+      const seen = new Map<string, string | null>();
+      const book = await book_read(file, undefined, seen, checking);
+      if (outs[0] !== undefined) {
+        why3_output(book, seen, outs[0], checking.config);
+        fs.writeFileSync(outs[0], Why3.export_session(book));
+      }
+      cli_report(book, 1);
+      return cli_proof_report(book);
+    }
     if (publish) {
-      return await cli_publish(file);
+      return await cli_publish(file, checking);
     }
     if (checkup) {
-      return await cli_checkup(file);
+      return await cli_checkup(file, checking);
     }
     const seen = new Map<string, string | null>();
-    const book = await book_read(file, undefined, seen);
+    const book = await book_read(file, undefined, seen, checking);
     if (outs.length !== 0 || book_main(book) !== null) {
       cli_report(book, 2);
     }
@@ -233,8 +301,10 @@ async function cli_file(args: string[]): Promise<void> {
       process.exitCode = book_run(book, argv);
       return;
     }
+    cli_proof_report(book, 2);
     const ins = new Set([...seen.keys(), ...Object.values(book.tlds).flatMap((t) =>
       t.$ === "Def" && t.i !== undefined ? t.i.map(path_real) : [])]);
+    if (checking.config !== undefined) ins.add(path_real(checking.config));
     for (const out of outs) {
       const at = path_real(out);
       if (ins.has(at) || (fs.existsSync(at) && fs.statSync(at).isDirectory())) {
@@ -248,10 +318,55 @@ async function cli_file(args: string[]): Promise<void> {
   }
 }
 
+async function cli_why3(file: string, out: string | undefined, run: boolean,
+  options: Why3.ExportOptions, proof: Why3.ProveOptions): Promise<void> {
+  const seen = new Map<string, string | null>();
+  const book = Bend.book_nil();
+  await Bend.book_load(book, file, "", seen);
+  const exported = Why3.export_book(book, { ...options, files: seen });
+  let dir: string | undefined;
+  if (out !== undefined) {
+    why3_output(book, seen, out, proof.config);
+    fs.writeFileSync(out, exported.source);
+  } else if (!run) {
+    return cli_say(1, exported.source);
+  } else {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "bend-why3-"));
+    out = path.join(dir, "laws.mlw");
+    fs.writeFileSync(out, exported.source);
+  }
+  if (!run) return;
+  let failed = false;
+  try {
+    const results = await Why3.prove(path.resolve(out!), exported.goals, proof);
+    for (const r of results) {
+      const at = (r.goal.file ?? file) + (r.goal.line === undefined ? "" : ":" + r.goal.line);
+      cli_say(1, at + ": " + r.goal.name + ": " + (r.valid ? "proved" : "unproved")
+        + " (" + r.attempts.map((a) => a.prover + ": " + a.answer.replace(/\s+/g, " ")).join(", ") + ")\n");
+      failed ||= !r.valid;
+    }
+    cli_say(1, results.filter((r) => r.valid).length + "/" + results.length + " laws proved by Why3.\n");
+  } finally {
+    if (dir !== undefined) fs.rmSync(dir, { recursive: true, force: true });
+  }
+  if (failed) process.exitCode = 1;
+}
+
+function why3_output(book: Bend.Book, seen: Map<string, string | null>, out: string, config?: string): void {
+  const at = path_real(out);
+  const inputs = new Set([...seen.keys(), ...Object.values(book.tlds).flatMap((t) =>
+    t.$ === "Def" && t.i !== undefined ? t.i.map(path_real) : [])]);
+  config ??= process.env.WHY3CONFIG;
+  if (config !== undefined) inputs.add(path_real(config));
+  if (inputs.has(at) || (fs.existsSync(at) && fs.statSync(at).isDirectory())) {
+    cli_fail("-o " + out + " is a file the program reads, or a directory");
+  }
+}
+
 // cli_checkup checks and runs each import of the file alone (Base read
 // once, seeded into every module that imports it); one that fails fails it.
-async function cli_checkup(file: string): Promise<void> {
-  const base = await book_read(BASE);
+async function cli_checkup(file: string, checking: Why3.CheckOptions): Promise<void> {
+  const base = await book_read(BASE, undefined, undefined, checking);
   let bad = false;
   for (const raw of fs.readFileSync(file, "utf8").split("\n")) {
     const m = /^import\s+(\S+)\s+as\s+[A-Za-z_][A-Za-z0-9_]*\s*$/
@@ -264,7 +379,7 @@ async function cli_checkup(file: string): Promise<void> {
     let code = 1;
     try {
       const own = /^import Base$/m.test(fs.readFileSync(at, "utf8"));
-      code = book_run(await book_read(at, own ? base : undefined), []);
+      code = book_run(await book_read(at, own ? base : undefined, undefined, checking), []);
     } catch (e) {
       cli_say(2, book_err(e) + "\n");
     }
@@ -283,6 +398,7 @@ function path_real(p: string): string {
 }
 
 function cli_emit(book: Bend.Book, out: string): void {
+  book = Why3.runtime_book(book);
   if (out.endsWith(".js")) {
     fs.writeFileSync(out, Comp.js_book(book));
   } else if (out.endsWith(".c")) {
@@ -393,13 +509,13 @@ function cli_base(what?: string): void {
   cli_say(1, want.join("\n\n") + "\n");
 }
 
-async function cli_bundle(page: string, dir: string): Promise<void> {
+async function cli_bundle(page: string, dir: string, checking: Why3.CheckOptions): Promise<void> {
   const out = await Bun.build({
     entrypoints: [page],
     outdir: dir,
     target: "browser",
     minify: true,
-    plugins: [PLUGIN],
+    plugins: [plugin(checking)],
   });
   for (const a of out.outputs) {
     cli_say(1, a.path + " (" + (a.size / 1024).toFixed(1) + "kb)\n");
@@ -411,10 +527,11 @@ async function cli_bundle(page: string, dir: string): Promise<void> {
 
 // cli_publish checks the file, then posts what the loader read (no TODO
 // left) to the hub with its proof of work, and prints the import line.
-async function cli_publish(file: string): Promise<void> {
+async function cli_publish(file: string, checking: Why3.CheckOptions): Promise<void> {
   const seen = new Map<string, string | null>();
-  const book = await book_read(file, undefined, seen);
+  const book = await book_read(file, undefined, seen, checking);
   cli_report(book, 2);
+  cli_proof_report(book, 2);
   const files = pkg_files(file, book, seen);
   const entry = Object.keys(files)[0];
   const name  = path.basename(entry, ".bend");
@@ -500,6 +617,12 @@ function cli_report(book: Bend.Book, fd: number): void {
   }
 }
 
+function cli_proof_report(book: Bend.Book, fd = 1): void {
+  const n = Why3.evidence(book).length;
+  if (n > 0) cli_say(fd, "Why3 proved " + n + " obligation" + (n === 1 ? "" : "s")
+    + " (trusted ATP evidence).\n");
+}
+
 function cli_say(fd: number, text: string): void {
   try {
     fs.writeSync(fd, text);
@@ -520,7 +643,7 @@ function cli_fail(msg: string): never {
 // ====
 
 async function book_read(file: string, base?: Bend.Book,
-  seen = new Map<string, string | null>()): Promise<Bend.Book> {
+  seen = new Map<string, string | null>(), checking: Why3.CheckOptions = {}): Promise<Bend.Book> {
   const book = base === undefined ? Bend.book_nil() : book_seed(base);
   if (base !== undefined) {
     seen.set(BASE, "");
@@ -531,12 +654,7 @@ async function book_read(file: string, base?: Bend.Book,
     && !seen.has(fs.realpathSync(laws))) {
     cli_fail("PROOF.bend must import ./LAWS.bend");
   }
-  Bend.book_valid(book, base?.order.length ?? 0);
-  const hols = book.hols + book.open;
-  if (hols > 0) {
-    throw "Error: " + String(hols) + " TODO" + (hols === 1 ? "" : "s")
-      + " found.\nThe code is incomplete, and not a valid proof yet.";
-  }
+  await Why3.check_book(book, { ...checking, files: seen }, base?.order.length ?? 0);
   return book;
 }
 
@@ -564,12 +682,16 @@ function book_run(book: Bend.Book, argv: string[]): number {
   const main = book_main(book);
   if (main === null) {
     cli_report(book, 1);
+    cli_proof_report(book);
     return 0;
   }
+  cli_proof_report(book, 2);
+  book = Why3.runtime_book(book);
   if (Comp.io_type(book) !== null) {
     return Comp.io_run(book, argv);
   }
-  const snf = Bend.term_snf(book, main.v as Bend.HTerm);
+  const snf = Bend.term_snf(book, (book.tlds["main"] as Bend.Def).v as Bend.HTerm);
+  Why3.executable_value(book, snf);
   cli_say(1, Bend.term_show(Bend.term_lower(snf)) + "\n");
   return 0;
 }
@@ -586,10 +708,10 @@ function book_err(e: unknown): string {
 // Load
 // ====
 
-async function load_js(path: string): Promise<string> {
+async function load_js(path: string, checking: Why3.CheckOptions = {}): Promise<string> {
   let book: Bend.Book;
   try {
-    book = await book_read(path);
+    book = await book_read(path, undefined, undefined, checking);
   } catch (e) {
     throw new Error(book_err(e));
   }
@@ -598,7 +720,7 @@ async function load_js(path: string): Promise<string> {
     return tld.$ === "Def" && tld.v !== null && tld.b !== true
       && tld.i === undefined && Comp.io_base(book, tld.T) === null;
   });
-  return Comp.js_lib(book, outs, outs);
+  return Comp.js_lib(Why3.runtime_book(book), outs, outs);
 }
 
 export async function load(u: string, context: unknown,

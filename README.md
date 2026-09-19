@@ -196,6 +196,8 @@ def add_zero(x):
 # References
 
 - Guide: [GUIDE.md](guide/GUIDE.md), also printed by `bend guide`.
+- Automatic proofs and reusable theorems: [Why3 integration](guide/WHY3.md).
+- [Why3 copies of every demo](demos/why3/README.md), with checked proof-size comparisons.
 - Demos: [demos/](demos), apps, servers and proofs, each with its `LAWS.bend`.
 - Base: [base.bend](bend2/base.bend), the base library, also printed by `bend base`.
 - Paper: [BendTT: An Affine Dependent Type Theory](paper/BendTT.pdf).
@@ -218,7 +220,7 @@ def add_zero(x):
 - Bend 2 is a new language. Bend 1 programs and HVM do not carry over.
 - Everything is annotated and nothing is inferred, so code is verbose.
 - No type classes, no traits, and no macros beyond compile-time templates.
-- Bend has no tactics or proof search; proving theorems takes extra effort.
+- Why3 automatically proves a first-order subset; harder laws use Bend proofs with `?auto` steps.
 - Values are affine: closures and arrays cannot be shared.
 - Recursion must be terminating. (Use `@unsafe` to disable this checker.)
 - Computed matches (`match f(x)`) aren't supported. Must split it manually.

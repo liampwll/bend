@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
-// Runs every test under tests/ on the cluster. The tests split into one
+// Runs kernel/runtime tests on the cluster with --kernel-only. Integrated
+// ATP tests in tests/auto run in the local gates/auto.ts with actual provers.
+// The tests split into one
 // shard per live mini; each shard is an aggregator that imports its tests,
 // sent to its mini, which checks and interprets every module through `bend
 // main.bend --checkup`, builds each runnable test alone (`bend t.bend -o t.js
@@ -146,8 +148,8 @@ function shard_script(shard: Test[], tag: number): string {
     + ` echo "${MARK} exit $?";`;
   return `export BUN_JSC_maxPerThreadStackUsage=33554432;`
     + ` d=$HOME/bend-test/${tag}; rm -rf $d; mkdir -p $d; cd $d; tar -xzf -;`
-    + ` echo "${MARK} checkup"; ${BUN} bend2/main.ts main.bend --checkup 2>&1;`
-    + ` xargs -P 10 -L 1 sh -c 'm=$1; shift; ${BUN} bend2/main.ts "$@"`
+    + ` echo "${MARK} checkup"; ${BUN} bend2/main.ts main.bend --checkup --kernel-only 2>&1;`
+    + ` xargs -P 10 -L 1 sh -c 'm=$1; shift; ${BUN} bend2/main.ts --kernel-only "$@"`
     + ` > $m.left 2>&1 && rm $m.left' -- < build.txt; echo "${MARK} built";`
     + ` for m in ${bangs.join(" ")}; do perl -e 'alarm 60; exec @ARGV' ./$m`
     + ` >/dev/null 2>&1; done; for m in ${runs.map((t) => t.name).join(" ")};`
@@ -207,7 +209,7 @@ async function shard_run(shard: Test[], tests: Test[], tag: number,
 // ====
 
 if (import.meta.main) {
-  const tests = fs.readdirSync(TESTS).sort().flatMap((dir) =>
+  const tests = fs.readdirSync(TESTS).filter((dir) => dir !== "auto").sort().flatMap((dir) =>
     fs.readdirSync(path.join(TESTS, dir)).filter((f) => f.endsWith(".bend"))
       .sort().map((f) => test_read(dir, f)));
   const nodes = await lib.node_lock();

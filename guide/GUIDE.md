@@ -273,7 +273,8 @@ you like. A template may call only templates declared above it. This is how
 
 ### Laws and Proofs
 
-A law states a fact that must hold. It must be proven inside a paired def.
+A law states a fact that must hold. A paired def supplies a proof; leaving it
+unfilled asks Why3 to prove it automatically during normal checking.
 
 ```python
 import Base
@@ -314,19 +315,22 @@ that they provide an actual proof.
 By convention, a project keeps its laws in two files at its root. `LAWS.bend`
 imports the code and states the laws, each an open claim: the human writes it,
 the AI does not touch it. `PROOF.bend` imports `LAWS.bend` and proves each law
-with a def of the same name (`law sorted` is proven by `def Laws.sorted`): the
-AI writes it, along with the code. `bend PROOF.bend` is the gate: it fails while
-any law is open or false, and prints "All terms check." once every law holds.
+with a def of the same name (`law sorted` is proven by `def Laws.sorted`),
+except for laws Why3 can discharge automatically. `bend PROOF.bend` is the
+gate: it fails while any law remains unproved, and prints "All terms check."
+once every law holds. It also reports when proofs rely on trusted ATP evidence.
 bend refuses a `PROOF.bend` that sits beside a `LAWS.bend` without importing it.
 
-Bend has no tactics: a proposition is a type, and a proof is a def of that type.
+A proposition is a type, and a proof is a term of that type.
 `{a == b : T}` is an equality; `{==}` proves it when both sides compute to the
 same term. Matching refines the goal in each case, a recursive call is the
 induction hypothesis, and `%e : P` rewrites with `e : {a == b : T}`: `P` is the
 goal with `_` marking `b`, and the goal becomes `P` with `a` there. `exs y: T`
 in a law asks for a witness, returned as `(y, proof)`. A failed step prints the
 expected and observed terms; `?name` prints the goal, `?TODO` leaves it open,
-and a law with no def is an open claim.
+and `?auto` asks Why3 to solve a local proof goal using verified earlier
+theorems and live local hypotheses. A law with no def is an automatic proof
+obligation. `--kernel-only` requires ordinary Bend proof terms throughout.
 
 Since types are terms, a def may return a `Type`, like `def IsEven(n: Nat) ->
 Type:`, which is all dependent types are. A `match e:` with no cases closes a
@@ -511,6 +515,24 @@ with Audio `libasound2-dev`. `bend guide` prints this text, `bend base` prints
 the Base library (`bend base Map` prints one name and everything under it), and
 `bend --help` lists the other commands.
 
+### Automatic proofs with Why3
+
+Normal checking, building, and importing use Why3 for open laws and `?auto`
+steps. A successful result becomes an opaque theorem usable in subsequent
+Bend proofs and Why3 obligations. Previously checked manual theorems can also
+help the ATP. Unproved, unsafe, future, and circular claims are never premises.
+
+Install Why3 and a prover, then run `why3 config detect`. The default is
+`alt-ergo` with one second per goal and prover. Use `--prover z3`, repeat
+`--prover` for a portfolio, or adjust `--timeout`. `--prove` checks without
+running main; `--prove -o proofs.mlw` saves the successful proof tasks.
+`--why3` exports independent law goals without invoking a prover.
+
+This adds the translator, Why3 and the selected ATP to the proof system's
+trusted components. It does not reconstruct kernel proof terms. Existential
+facts can be used logically, but executable witnesses still need Bend bodies.
+See [WHY3.md](WHY3.md) for examples, the supported subset and trust boundary.
+
 ## Syntax Reference
 
 Every form of the language, grouped by where it appears. Operators, literals
@@ -555,7 +577,7 @@ f(a, b)  f!(a)  t(~g, a)                 # a call, on the GPU, of a template
 (a + b * c : T)  {x : T}                 # operators over T; an annotation
 [v : T*n]  [v : T^d]  a[i]  a[i] <- v    # an array of n or 2^d slots; a read, a write
 {==}  %e : P; e2  %e@E : P; e2           # reflexivity, a rewrite, a named one
-?name  ?TODO                             # print the goal; leave it open
+?name  ?TODO  ?auto                      # print; leave open; solve with Why3
 ```
 
 ```python
